@@ -18,19 +18,14 @@ Guarantees:
 ## Commands
 
     coalesce run NAME -- COMMAND [ARG...]    start the worker loop
-    coalesce trigger NAME                   signal the worker
+    coalesce trigger NAME                    signal the worker
     coalesce poke NAME -- COMMAND [ARG...]   ensure the worker exists, then trigger
-    coalesce status NAME                    print state: idle | running | running dirty
-    coalesce cancel NAME                    clear the pending follow-up
+    coalesce status NAME                     print state: idle | running | running dirty
+    coalesce cancel NAME                     clear the pending follow-up
 
 `run` is a long-lived worker. `trigger` requires it to be running; `poke`
 spawns it if not, then triggers. This keeps the command (one place) decoupled
 from the sources of triggers (webhooks, file watchers, timers).
-
-## Build
-
-    make
-    make install    # binary + manpage into /usr/local by default
 
 ## Examples
 

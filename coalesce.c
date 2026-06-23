@@ -64,6 +64,13 @@ static int valid_name(const char *name) {
   return 1;
 }
 
+/* Validate a name, reporting and returning 1 if it is rejected. */
+static int check_name(const char *name) {
+  if (valid_name(name)) return 0;
+  fprintf(stderr, "coalesce: invalid name '%s'\n", name);
+  return 1;
+}
+
 /* runtime directory: XDG_RUNTIME_DIR, /run (root), or /tmp/coalesce-<uid> */
 static const char *runtimedir(void) {
   const char *e = getenv("XDG_RUNTIME_DIR");
@@ -90,13 +97,17 @@ static int socket_path(const char *name, char *out, size_t outsz) {
   return 0;
 }
 
+static void ux_addr(struct sockaddr_un *sa, const char *path) {
+  memset(sa, 0, sizeof *sa);
+  sa->sun_family = AF_UNIX;
+  strncpy(sa->sun_path, path, sizeof sa->sun_path - 1);
+}
+
 static int ux_connect(const char *path) {
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) return -1;
   struct sockaddr_un sa;
-  memset(&sa, 0, sizeof sa);
-  sa.sun_family = AF_UNIX;
-  strncpy(sa.sun_path, path, sizeof sa.sun_path - 1);
+  ux_addr(&sa, path);
   if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
     close(fd);
     return -1;
@@ -136,12 +147,6 @@ static int exchange(int fd, char msg, char *st, size_t ssz) {
   return 0;
 }
 
-static int send_msg(const char *path, char msg, char *st, size_t ssz) {
-  int fd = ux_connect(path);
-  if (fd < 0) return -1;
-  return exchange(fd, msg, st, ssz);
-}
-
 /* ---------------- client commands ---------------- */
 
 /* Connect to a worker, send one message byte, and optionally print the
@@ -149,7 +154,8 @@ static int send_msg(const char *path, char msg, char *st, size_t ssz) {
 static int client_cmd(const char *name, char msg, int do_print) {
   char path[PATH_MAX], st[64];
   if (socket_path(name, path, sizeof path) < 0) die("socket_path");
-  if (send_msg(path, msg, st, sizeof st) < 0) {
+  int fd = ux_connect(path);
+  if (fd < 0 || exchange(fd, msg, st, sizeof st) < 0) {
     fprintf(stderr, "coalesce: no worker '%s'\n", name);
     return 1;
   }
@@ -216,6 +222,22 @@ static const char *state_str(int running, int dirty) {
   return dirty ? "running dirty" : "running";
 }
 
+/* Spawn the command and update worker state. Returns 0 if started or the
+ * failure was transient (logged), 2 if the command is unrunnable -- the
+ * caller should unlink the socket and exit 2. */
+static int start_run(char **argv, pid_t *child, int *running, int *dirty) {
+  int r = spawn(argv, child);
+  if (r == 0) {
+    *running = 1;
+    *dirty = 0;
+  } else if (r == 1) {
+    return 2; /* command is unrunnable */
+  } else {
+    perror("coalesce: spawn");
+  }
+  return 0;
+}
+
 static int run_worker(const char *name, const char *path, char **argv) {
   int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (lfd < 0) die("socket");
@@ -277,19 +299,15 @@ static int run_worker(const char *name, const char *path, char **argv) {
         struct timeval tv = {.tv_sec = 2};
         setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
         char msg = 0;
+        /* Every client gets the state line back; MSG_STATUS is just a read
+         * with no side effect, so only TRIGGER and CANCEL are handled here. */
         if (read(cfd, &msg, 1) == 1) {
           if (msg == MSG_TRIGGER) {
             if (!running) {
-              int r = spawn(argv, &child);
-              if (r == 0) {
-                running = 1;
-                dirty = 0;
-              } else if (r == 1) {
+              if (start_run(argv, &child, &running, &dirty) == 2) {
                 close(cfd);
                 unlink(path);
-                return 2; /* command is unrunnable */
-              } else {
-                perror("coalesce: spawn");
+                return 2;
               }
             } else {
               dirty = 1;
@@ -326,17 +344,9 @@ static int run_worker(const char *name, const char *path, char **argv) {
         if (waitpid(child, &st, WNOHANG) == child) {
           running = 0;
           child = -1;
-          if (dirty) {
-            int r = spawn(argv, &child);
-            if (r == 0) {
-              dirty = 0;
-              running = 1;
-            } else if (r == 1) {
-              unlink(path);
-              return 2;
-            } else {
-              perror("coalesce: spawn");
-            }
+          if (dirty && start_run(argv, &child, &running, &dirty) == 2) {
+            unlink(path);
+            return 2;
           }
         }
       }
@@ -402,10 +412,7 @@ int main(int argc, char **argv) {
   if (!strcmp(cmd, "run") || !strcmp(cmd, "poke")) {
     if (argc < 5) return usage();
     const char *name = argv[2];
-    if (!valid_name(name)) {
-      fprintf(stderr, "coalesce: invalid name '%s'\n", name);
-      return 2;
-    }
+    if (check_name(name)) return 2;
     if (strcmp(argv[3], "--") != 0) return usage();
     char **cargv = &argv[4];
     if (!cargv[0]) return usage();
@@ -421,10 +428,7 @@ int main(int argc, char **argv) {
       !strcmp(cmd, "status")) {
     if (argc != 3) return usage();
     const char *name = argv[2];
-    if (!valid_name(name)) {
-      fprintf(stderr, "coalesce: invalid name '%s'\n", name);
-      return 2;
-    }
+    if (check_name(name)) return 2;
     if (!strcmp(cmd, "trigger")) return client_cmd(name, MSG_TRIGGER, 0);
     if (!strcmp(cmd, "cancel")) return client_cmd(name, MSG_CANCEL, 0);
     return client_cmd(name, MSG_STATUS, 1);
