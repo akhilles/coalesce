@@ -1,0 +1,200 @@
+.Dd $Mdocdate: June 23 2026 $
+.Dt COALESCE 1
+.Os
+.Sh NAME
+.Nm coalesce
+.Nd a coalescing oneshot runner
+.Sh SYNOPSIS
+.Nm
+.Cm run
+.Ar name
+.Cm --
+.Ar command
+.Op Ar arg ...
+.Nm
+.Cm trigger
+.Ar name
+.Nm
+.Cm poke
+.Ar name
+.Cm --
+.Ar command
+.Op Ar arg ...
+.Nm
+.Cm status
+.Ar name
+.Nm
+.Cm cancel
+.Ar name
+.Sh DESCRIPTION
+.Nm
+runs a command in response to external triggers.
+It guarantees:
+.Bl -bullet -compact
+.It
+at most one instance of the command runs at a time;
+.It
+triggers received while the command is running collapse into a single
+pending run;
+.It
+on exit, the command runs once more if any trigger arrived during the run;
+.It
+repeated triggers never create an unbounded queue.
+.El
+.Pp
+It manages a named, edge-triggered worker.
+A trigger means:
+.Dq The world may have changed; please reconcile.
+The command should be written as a reconciliation task
+.Pq Li sync-repo , Li deploy-latest , Li rebuild-index ,
+not as a per-event handler
+.Pq Li process-this-payload , Li send-one-email-per-trigger .
+.Pp
+The worker is a long-lived process:
+.Cm run
+stays alive listening on a unix socket so that command-less
+.Cm trigger Ns s can reach it.
+This keeps the command \(em managed by a service supervisor \(em decoupled
+from the sources of triggers \(em webhooks, file watchers, timers.
+.Sh SUBCOMMANDS
+.Bl -tag -width "poke name -- command"
+.It Cm run Ar name Cm -- Ar command Op Ar arg ...
+Start the named worker loop.
+The loop persists until it receives
+.Dv SIGTERM
+or
+.Dv SIGINT ,
+forwarding the signal to the running command, reaping it, and exiting.
+If a worker for
+.Ar name
+is already running,
+.Nm
+exits with an error.
+.It Cm trigger Ar name
+Signal the worker.
+If it is idle, one run is started.
+If it is running, the worker is marked dirty and will run once more after the
+current run finishes.
+Requires a live worker
+.Pq see Cm poke .
+.It Cm poke Ar name Cm -- Ar command Op Ar arg ...
+Ensure the worker exists, then trigger it.
+If no worker is running, one is spawned detached and triggered.
+If a worker is already running, only the trigger is delivered
+.Pq the given command is ignored in that case .
+This is the common single-command integration path for webhooks and file
+watchers.
+.It Cm status Ar name
+Print the worker state to standard output and exit.
+.It Cm cancel Ar name
+Clear the pending dirty bit.
+This does
+.Em not
+kill a currently running command.
+.El
+.Sh STATES
+.Bl -tag -width "running dirty" -compact
+.It idle
+no command running; no pending run.
+.It running
+a command is running; no pending run.
+.It running dirty
+a command is running and one more run is pending.
+.El
+.Pp
+Reported by
+.Cm status ,
+and as the reply to every
+.Cm trigger
+or
+.Cm cancel .
+.Sh ENVIRONMENT
+.Bl -tag -width "XDG_RUNTIME_DIR"
+.It Ev XDG_RUNTIME_DIR
+Base directory for the per-worker sockets.
+If unset, root uses
+.Pa /run
+and other users use
+.Pa /tmp/coalesce- Ns Em uid .
+.El
+.Sh FILES
+Sockets live at
+.Pa $XDG_RUNTIME_DIR/coalesce/ Ns Em name Ns Pa .sock
+.Pq or the fallback above .
+The directory is created with mode
+.Li 0700 .
+Stale sockets left behind by a killed worker are detected and reclaimed on the
+next
+.Cm run
+or
+.Cm poke .
+.Sh EXIT STATUS
+.Bl -tag -width 4n -compact
+.It 0
+Success.
+For
+.Cm run ,
+a clean shutdown via signal; for the others, successful delivery.
+.It 1
+No worker is listening
+.Pq Cm trigger , Cm cancel , Cm status , or Cm poke could not reach or start a worker ,
+or a worker with
+.Ar name
+is already running
+.Pq Cm run .
+.It 2
+Usage error, or the managed command could not be executed
+.Pq Cm run , when triggered .
+.El
+.Pp
+The exit status of the managed command itself is not propagated:
+a failed run with no pending trigger returns the worker to idle.
+Retry policy is intentionally out of scope \(en use a supervisor
+.Pq Xr systemd 1 , Xr cron 8 ,
+or the command itself.
+.Sh EXAMPLES
+.Ss Worker under systemd
+.Bd -literal -offset indent
+[Service]
+Type=exec
+Restart=always
+ExecStart=/usr/local/bin/coalesce run deploy -- /srv/app/deploy-latest
+.Ed
+.Ss Webhook receiver
+.Bd -literal -offset indent
+#!/bin/sh
+coalesce trigger deploy
+.Ed
+.Ss Webhook receiver that also ensures the worker is up
+.Bd -literal -offset indent
+#!/bin/sh
+coalesce poke deploy -- /srv/app/deploy-latest
+.Ed
+.Ss File watcher
+.Bd -literal -offset indent
+while inotifywait -e close_write -r src; do
+    coalesce poke build -- make
+done
+.Ed
+.Ss Introspection and cancellation
+.Bd -literal -offset indent
+$ coalesce status deploy
+running dirty
+$ coalesce cancel deploy
+$ coalesce status deploy
+running
+.Ed
+.Sh SEE ALSO
+.Xr entr 1 ,
+.Xr fswatch 1 ,
+.Xr systemd.unit 5
+.Sh AUTHORS
+.An -nosplit
+.An The coalesce project
+.Sh CAVEATS
+.Nm
+is not a job queue, scheduler, retry daemon, pub/sub system, lock manager,
+workflow engine, or per-event delivery mechanism.
+It is only a named, coalescing, edge-triggered runner.
+No event payloads are passed to the command; the command reconciles against
+durable external state.

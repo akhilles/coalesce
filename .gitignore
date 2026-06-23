@@ -1,0 +1,14 @@
+# build artifacts
+/coalesce
+/coalesce_asan
+*.o
+*.lo
+*.dSYM/
+
+# editor / OS cruft
+.DS_Store
+*~
+.*.swp
+.*.swo
+\#*\#
+.\#*
