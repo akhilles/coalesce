@@ -19,7 +19,10 @@ uninstall:
 lint: coalesce.1
 	@mandoc -Tlint coalesce.1 2>&1 | grep -vE 'mandoc\.db|referenced manual not found' | grep . && exit 1 || exit 0
 
+test: coalesce
+	./test.sh
+
 clean:
 	rm -f coalesce
 
-.PHONY: install uninstall lint clean
+.PHONY: install uninstall lint clean test
