@@ -203,16 +203,18 @@ tally() {
 # --- checks ---
 
 # idle + trigger -> run; trigger during run -> dirty; finish + dirty -> one more.
+# The run is gated open so the dirty trigger provably lands mid-run under load.
 check_basic_state() {
   NAME=t_basic; trap 'kill_worker "$NAME"' EXIT
-  cnt="$RTDIR/c_basic"; : > "$cnt"
-  "$COALESCE" run "$NAME" -- sh -c 'echo x >>"$1"; sleep 0.4' _ "$cnt" &
+  cnt="$RTDIR/c_basic"; gate="$RTDIR/g_basic"; : > "$cnt"
+  "$COALESCE" run "$NAME" -- sh -c 'while [ ! -e "$2" ]; do sleep 0.02; done; echo x >>"$1"' _ "$cnt" "$gate" &
   wait_up "$NAME"                  || fail "worker not up"
   is_state "$NAME" idle            || fail "expected idle"
   "$COALESCE" trigger "$NAME"      || fail "trigger failed"
   wait_state "$NAME" running       || fail "trigger did not start a run"
   "$COALESCE" trigger "$NAME"      # during run -> dirty
   is_state "$NAME" "running dirty" || fail "expected running dirty"
+  : > "$gate"                      # release run 1; the pending follow-up runs
   wait_state "$NAME" idle          || fail "never returned to idle"
   n=$(count "$cnt"); [ "$n" = 2 ]  || fail "expected 2 runs, got $n"
 }
@@ -220,8 +222,8 @@ check_basic_state() {
 # cancel clears a pending dirty bit; the in-flight run is left alone.
 check_cancel() {
   NAME=t_cancel; trap 'kill_worker "$NAME"' EXIT
-  cnt="$RTDIR/c_cancel"; : > "$cnt"
-  "$COALESCE" run "$NAME" -- sh -c 'echo x >>"$1"; sleep 0.5' _ "$cnt" &
+  cnt="$RTDIR/c_cancel"; gate="$RTDIR/g_cancel"; : > "$cnt"
+  "$COALESCE" run "$NAME" -- sh -c 'while [ ! -e "$2" ]; do sleep 0.02; done; echo x >>"$1"' _ "$cnt" "$gate" &
   wait_up "$NAME"                  || fail "worker not up"
   "$COALESCE" trigger "$NAME"      || fail "trigger failed"
   wait_state "$NAME" running       || fail "run did not start"
@@ -229,6 +231,7 @@ check_cancel() {
   is_state "$NAME" "running dirty" || fail "expected running dirty"
   "$COALESCE" cancel "$NAME"       # clear dirty
   is_state "$NAME" running         || fail "cancel did not clear dirty"
+  : > "$gate"                      # release run 1; dirty cleared -> no follow-up
   wait_state "$NAME" idle          || fail "never returned to idle"
   n=$(count "$cnt"); [ "$n" = 1 ]  || fail "expected 1 run, got $n"
 }
@@ -277,20 +280,24 @@ check_poke() {
 }
 
 # 20 triggers fired during a single run collapse into exactly one follow-up.
+# Each run blocks on a gate file so the window stays open until every trigger
+# has provably landed -- making the assertion independent of timing/load.
 check_stress() {
   NAME=t_stress; trap 'kill_worker "$NAME"' EXIT
-  cnt="$RTDIR/c_stress"; : > "$cnt"
-  "$COALESCE" run "$NAME" -- sh -c 'echo x >>"$1"; sleep 0.6' _ "$cnt" &
+  cnt="$RTDIR/c_stress"; gate="$RTDIR/g_stress"; : > "$cnt"
+  "$COALESCE" run "$NAME" -- sh -c 'while [ ! -e "$2" ]; do sleep 0.02; done; echo x >>"$1"' _ "$cnt" "$gate" &
   wait_up "$NAME"             || fail "worker not up"
-  "$COALESCE" trigger "$NAME" # start run 1
+  "$COALESCE" trigger "$NAME" # start run 1 (blocks on the gate)
   wait_state "$NAME" running  || fail "run did not start"
   i=0
   while [ "$i" -lt 20 ]; do
     "$COALESCE" trigger "$NAME" >/dev/null 2>&1
     i=$((i+1))
   done
-  wait_state "$NAME" idle         || fail "never returned to idle"
-  n=$(count "$cnt"); [ "$n" = 2 ] || fail "expected 2 runs, got $n"
+  is_state "$NAME" "running dirty" || fail "20 triggers did not collapse to one pending run"
+  : > "$gate"                      # release run 1; the single follow-up then runs
+  wait_state "$NAME" idle          || fail "never returned to idle"
+  n=$(count "$cnt"); [ "$n" = 2 ]  || fail "expected 2 runs, got $n"
 }
 
 # SIGTERM to a busy worker terminates the in-flight command and exits cleanly.
@@ -313,14 +320,16 @@ check_sigterm() {
 # while a worker is live, poke delivers only a trigger -- its command is ignored.
 check_poke_ignores_cmd() {
   NAME=t_pokeign; trap 'kill_worker "$NAME"' EXIT
-  a="$RTDIR/a_pokeign"; b="$RTDIR/b_pokeign"; : > "$a"; : > "$b"
-  "$COALESCE" poke "$NAME" -- sh -c 'echo A >>"$1"; sleep 0.5' _ "$a" || fail "first poke failed"
-  wait_up "$NAME"            || fail "poke did not spawn a worker"
-  wait_state "$NAME" running || fail "command A did not start"
-  "$COALESCE" poke "$NAME" -- sh -c 'echo B >>"$1"; sleep 0.1' _ "$b" || fail "second poke failed"
-  wait_state "$NAME" idle    || fail "never returned to idle"
-  grep -q A "$a"             || fail "command A should have run"
-  [ -s "$b" ]                && fail "command B should have been ignored"
+  a="$RTDIR/a_pokeign"; b="$RTDIR/b_pokeign"; gate="$RTDIR/g_pokeign"; : > "$a"; : > "$b"
+  "$COALESCE" poke "$NAME" -- sh -c 'while [ ! -e "$2" ]; do sleep 0.02; done; echo A >>"$1"' _ "$a" "$gate" || fail "first poke failed"
+  wait_up "$NAME"                  || fail "poke did not spawn a worker"
+  wait_state "$NAME" running       || fail "command A did not start"
+  "$COALESCE" poke "$NAME" -- sh -c 'echo B >>"$1"' _ "$b" || fail "second poke failed"
+  is_state "$NAME" "running dirty" || fail "second poke did not just trigger the live worker"
+  : > "$gate"                      # release; the follow-up re-runs A, never B
+  wait_state "$NAME" idle          || fail "never returned to idle"
+  grep -q A "$a"                   || fail "command A should have run"
+  [ -s "$b" ]                      && fail "command B should have been ignored"
   return 0
 }
 
