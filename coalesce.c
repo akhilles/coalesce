@@ -147,8 +147,6 @@ static int exchange(int fd, char msg, char *st, size_t ssz) {
   return 0;
 }
 
-/* ---------------- client commands ---------------- */
-
 /* Connect to a worker, send one message byte, and optionally print the
  * returned state line. Returns 0 on success, 1 if no worker is listening. */
 static int client_cmd(const char *name, char msg, int do_print) {
@@ -162,8 +160,6 @@ static int client_cmd(const char *name, char msg, int do_print) {
   if (do_print) printf("%s\n", st);
   return 0;
 }
-
-/* ---------------- worker ---------------- */
 
 static int g_wake[2] = {-1, -1};
 static volatile sig_atomic_t sig_chld = 0, sig_term = 0;
