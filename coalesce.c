@@ -137,7 +137,7 @@ static int exchange(int fd, char msg, char *st, size_t ssz) {
   for (;;) {
     ssize_t r = read(fd, st + off, ssz - 1 - off);
     if (r <= 0) break;
-    off += r;
+    off += (size_t)r; /* r > 0 here */
     st[off] = 0;
     if (strchr(st, '\n')) break;
   }
@@ -318,7 +318,7 @@ static int run_worker(const char *name, const char *path, char **argv) {
         }
         char buf[64];
         int m = snprintf(buf, sizeof buf, "%s\n", state_str(running, dirty));
-        write(cfd, buf, m);
+        write(cfd, buf, (size_t)m); /* m is a small positive snprintf result */
         close(cfd);
       }
     }

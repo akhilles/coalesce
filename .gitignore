@@ -1,6 +1,8 @@
 # build artifacts
 /coalesce
-/coalesce_asan
+/coalesce.asan
+/coalesce.tsan
+/coalesce.msan
 *.o
 *.lo
 *.dSYM/
