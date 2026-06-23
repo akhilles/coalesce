@@ -239,23 +239,19 @@ static int run_worker(const char *name, const char *path, char **argv) {
   if (lfd < 0) die("socket");
 
   struct sockaddr_un sa;
-  memset(&sa, 0, sizeof sa);
-  sa.sun_family = AF_UNIX;
-  strncpy(sa.sun_path, path, sizeof sa.sun_path - 1);
+  ux_addr(&sa, path);
 
   if (bind(lfd, (struct sockaddr *)&sa, sizeof sa) < 0) {
-    if (errno == EADDRINUSE) {
-      int t = ux_connect(path);
-      if (t >= 0) {
-        close(t);
-        fprintf(stderr, "coalesce: worker '%s' already running\n", name);
-        return 1;
-      }
-      unlink(path);
-      if (bind(lfd, (struct sockaddr *)&sa, sizeof sa) < 0) die("bind");
-    } else {
-      die("bind");
+    if (errno != EADDRINUSE) die("bind");
+    /* address in use: a live worker owns it, else the socket is stale. */
+    int t = ux_connect(path);
+    if (t >= 0) {
+      close(t);
+      fprintf(stderr, "coalesce: worker '%s' already running\n", name);
+      return 1;
     }
+    unlink(path);
+    if (bind(lfd, (struct sockaddr *)&sa, sizeof sa) < 0) die("bind");
   }
   if (listen(lfd, 16) < 0) die("listen");
   set_nonblock(lfd);
@@ -337,7 +333,7 @@ static int run_worker(const char *name, const char *path, char **argv) {
       if (sig_chld) {
         sig_chld = 0;
         int st;
-        if (waitpid(child, &st, WNOHANG) == child) {
+        if (child > 0 && waitpid(child, &st, WNOHANG) == child) {
           running = 0;
           child = -1;
           if (dirty && start_run(argv, &child, &running, &dirty) == 2) {
