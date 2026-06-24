@@ -218,20 +218,20 @@ static const char *state_str(int running, int dirty) {
   return dirty ? "running dirty" : "running";
 }
 
-/* Spawn the command and update worker state. Returns 0 if started or the
- * failure was transient (logged), 2 if the command is unrunnable -- the
- * caller should unlink the socket and exit 2. */
+/* Spawn the command and update worker state. Returns 0 if the run started, or
+ * 2 if it could not be started at all -- exec failure (r == 1) or fork/pipe
+ * failure (r == -1). The caller should unlink the socket and exit 2: never
+ * continue in a state where a requested run has silently vanished; let a
+ * supervisor restart a clean worker instead. */
 static int start_run(char **argv, pid_t *child, int *running, int *dirty) {
   int r = spawn(argv, child);
   if (r == 0) {
     *running = 1;
     *dirty = 0;
-  } else if (r == 1) {
-    return 2; /* command is unrunnable */
-  } else {
-    perror("coalesce: spawn");
+    return 0;
   }
-  return 0;
+  if (r < 0) perror("coalesce: spawn");
+  return 2;
 }
 
 static int run_worker(const char *name, const char *path, char **argv) {
