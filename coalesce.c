@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: 0BSD
+ *
  * coalesce -- a Unix-style coalescing oneshot runner.
  *
  *   coalesce run     NAME -- COMMAND [ARG...]
@@ -20,8 +22,6 @@
  * isn't already running, then triggers it -- the single-command integration
  * path for webhooks and file watchers.
  */
-
-#define _XOPEN_SOURCE 700
 
 #include <errno.h>
 #include <fcntl.h>
