@@ -1,5 +1,5 @@
 CC      ?= cc
-CFLAGS  ?= -O2 -Wall -Wextra -std=gnu11
+CFLAGS  ?= -O2 -Wall -Wextra -std=gnu99
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 MANDIR  ?= $(PREFIX)/share/man/man1

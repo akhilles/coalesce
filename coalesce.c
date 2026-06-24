@@ -46,7 +46,14 @@
 /* protocol bytes */
 enum { MSG_TRIGGER = 'T', MSG_CANCEL = 'C', MSG_STATUS = 'S' };
 
-static _Noreturn void die(const char *msg) {
+/* _Noreturn is C11; we build as C99, so fall back to the GCC/Clang attribute. */
+#if __STDC_VERSION__ >= 201112L
+#define NORETURN _Noreturn
+#else
+#define NORETURN __attribute__((noreturn))
+#endif
+
+static NORETURN void die(const char *msg) {
   perror(msg);
   exit(1);
 }
