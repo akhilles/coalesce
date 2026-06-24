@@ -30,6 +30,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,7 +48,7 @@
 /* protocol bytes */
 enum { MSG_TRIGGER = 'T', MSG_CANCEL = 'C', MSG_STATUS = 'S' };
 
-static void die(const char *msg) {
+static _Noreturn void die(const char *msg) {
   perror(msg);
   exit(1);
 }
@@ -149,7 +150,7 @@ static int exchange(int fd, char msg, char *st, size_t ssz) {
 
 /* Connect to a worker, send one message byte, and optionally print the
  * returned state line. Returns 0 on success, 1 if no worker is listening. */
-static int client_cmd(const char *name, char msg, int do_print) {
+static int client_cmd(const char *name, char msg, bool do_print) {
   char path[PATH_MAX], st[64];
   if (socket_path(name, path, sizeof path) < 0) die("socket_path");
   int fd = ux_connect(path);
@@ -213,7 +214,7 @@ static int spawn(char **argv, pid_t *out_pid) {
   return 0;
 }
 
-static const char *state_str(int running, int dirty) {
+static const char *state_str(bool running, bool dirty) {
   if (!running) return "idle";
   return dirty ? "running dirty" : "running";
 }
@@ -223,11 +224,11 @@ static const char *state_str(int running, int dirty) {
  * failure (r == -1). The caller should unlink the socket and exit 2: never
  * continue in a state where a requested run has silently vanished; let a
  * supervisor restart a clean worker instead. */
-static int start_run(char **argv, pid_t *child, int *running, int *dirty) {
+static int start_run(char **argv, pid_t *child, bool *running, bool *dirty) {
   int r = spawn(argv, child);
   if (r == 0) {
-    *running = 1;
-    *dirty = 0;
+    *running = true;
+    *dirty = false;
     return 0;
   }
   if (r < 0) perror("coalesce: spawn");
@@ -273,7 +274,7 @@ static int run_worker(const char *name, const char *path, char **argv) {
   sigaction(SIGINT, &s, NULL);
   signal(SIGPIPE, SIG_IGN);
 
-  int running = 0, dirty = 0;
+  bool running = false, dirty = false;
   pid_t child = -1;
 
   for (;;) {
@@ -302,10 +303,10 @@ static int run_worker(const char *name, const char *path, char **argv) {
                 return 2;
               }
             } else {
-              dirty = 1;
+              dirty = true;
             }
           } else if (msg == MSG_CANCEL) {
-            dirty = 0;
+            dirty = false;
           }
         }
         char buf[64];
@@ -334,7 +335,7 @@ static int run_worker(const char *name, const char *path, char **argv) {
         sig_chld = 0;
         int st;
         if (child > 0 && waitpid(child, &st, WNOHANG) == child) {
-          running = 0;
+          running = false;
           child = -1;
           if (dirty && start_run(argv, &child, &running, &dirty) == 2) {
             unlink(path);
@@ -421,9 +422,9 @@ int main(int argc, char **argv) {
     if (argc != 3) return usage();
     const char *name = argv[2];
     if (check_name(name)) return 2;
-    if (!strcmp(cmd, "trigger")) return client_cmd(name, MSG_TRIGGER, 0);
-    if (!strcmp(cmd, "cancel")) return client_cmd(name, MSG_CANCEL, 0);
-    return client_cmd(name, MSG_STATUS, 1);
+    if (!strcmp(cmd, "trigger")) return client_cmd(name, MSG_TRIGGER, false);
+    if (!strcmp(cmd, "cancel")) return client_cmd(name, MSG_CANCEL, false);
+    return client_cmd(name, MSG_STATUS, true);
   }
 
   return usage();
