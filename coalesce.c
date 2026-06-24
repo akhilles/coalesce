@@ -19,11 +19,9 @@
  * that command-less `trigger`s can reach it. `poke` spawns the worker if it
  * isn't already running, then triggers it -- the single-command integration
  * path for webhooks and file watchers.
- *
- * Build: make
  */
 
-#define _GNU_SOURCE
+#define _XOPEN_SOURCE 700
 
 #include <errno.h>
 #include <fcntl.h>
@@ -235,7 +233,12 @@ static int start_run(char **argv, pid_t *child, bool *running, bool *dirty) {
   return 2;
 }
 
-static int run_worker(const char *name, const char *path, char **argv) {
+/* Create, bind, and listen on the worker socket. Returns the listening fd, or
+ * -1 if a live worker already owns it; a stale socket left by a dead worker is
+ * reclaimed, and fatal errors abort via die(). Binding here -- before the
+ * worker forks -- means the socket is ready the moment a client connects, so
+ * poke needs no startup poll. */
+static int bind_listen(const char *path) {
   int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (lfd < 0) die("socket");
 
@@ -248,8 +251,8 @@ static int run_worker(const char *name, const char *path, char **argv) {
     int t = ux_connect(path);
     if (t >= 0) {
       close(t);
-      fprintf(stderr, "coalesce: worker '%s' already running\n", name);
-      return 1;
+      close(lfd);
+      return -1;
     }
     unlink(path);
     if (bind(lfd, (struct sockaddr *)&sa, sizeof sa) < 0) die("bind");
@@ -257,7 +260,10 @@ static int run_worker(const char *name, const char *path, char **argv) {
   if (listen(lfd, 16) < 0) die("listen");
   set_nonblock(lfd);
   set_cloexec(lfd);
+  return lfd;
+}
 
+static int run_worker(const char *path, char **argv, int lfd) {
   if (pipe(g_wake) < 0) die("pipe");
   set_nonblock(g_wake[0]);
   set_nonblock(g_wake[1]);
@@ -347,32 +353,40 @@ static int run_worker(const char *name, const char *path, char **argv) {
   }
 }
 
+/* Detach from the controlling terminal and send std fds to /dev/null. */
+static void daemonize(void) {
+  setsid();
+  int dn = open("/dev/null", O_RDWR);
+  if (dn >= 0) {
+    dup2(dn, 0);
+    dup2(dn, 1);
+    dup2(dn, 2);
+    if (dn > 2) close(dn);
+  }
+  signal(SIGHUP, SIG_IGN);
+}
+
 static int cmd_poke(const char *name, char **argv) {
   char path[PATH_MAX];
   if (socket_path(name, path, sizeof path) < 0) die("socket_path");
 
   int fd = ux_connect(path);
   if (fd < 0) {
-    /* spawn a detached worker, then retry the connection. */
-    pid_t pid = fork();
-    if (pid < 0) die("fork");
-    if (pid == 0) {
-      setsid();
-      int dn = open("/dev/null", O_RDWR);
-      if (dn >= 0) {
-        dup2(dn, 0);
-        dup2(dn, 1);
-        dup2(dn, 2);
-        if (dn > 2) close(dn);
+    /* No worker yet: bind+listen so the socket is ready before we connect,
+     * then fork a detached worker to serve it. If we lost the race and another
+     * process just bound it, bind_listen returns -1 and we skip the fork. The
+     * worker exists either way, so connecting is the single path out. */
+    int lfd = bind_listen(path);
+    if (lfd >= 0) {
+      pid_t pid = fork();
+      if (pid < 0) die("fork");
+      if (pid == 0) {
+        daemonize();
+        _exit(run_worker(path, argv, lfd));
       }
-      signal(SIGHUP, SIG_IGN);
-      _exit(run_worker(name, path, argv));
+      close(lfd);
     }
-    for (int i = 0; i < 300; i++) {
-      fd = ux_connect(path);
-      if (fd >= 0) break;
-      usleep(10 * 1000); /* 10ms; up to 3s */
-    }
+    fd = ux_connect(path);
     if (fd < 0) {
       fprintf(stderr, "coalesce: could not start worker '%s'\n", name);
       return 1;
@@ -412,7 +426,12 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "run")) {
       char path[PATH_MAX];
       if (socket_path(name, path, sizeof path) < 0) die("socket_path");
-      return run_worker(name, path, cargv);
+      int lfd = bind_listen(path);
+      if (lfd < 0) {
+        fprintf(stderr, "coalesce: worker '%s' already running\n", name);
+        return 1;
+      }
+      return run_worker(path, cargv, lfd);
     }
     return cmd_poke(name, cargv);
   }
